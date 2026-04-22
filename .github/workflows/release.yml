@@ -38,25 +38,36 @@ jobs:
             })
             return data.id
 
-  publish-tauri:
+  build:
     permissions:
       contents: write
     needs: create-release
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: "macos-26" # Apple Silicon (M1+)
-            args: "--target aarch64-apple-darwin"
-            target: "aarch64-apple-darwin"
+    runs-on: macos-26
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    uses: ./.github/workflows/build.yml
-    with:
-      platform: ${{ matrix.platform }}
-      target: ${{ matrix.target }}
-      build-args: ${{ matrix.args }}
-      sign-binaries: false
-      asset-prefix: "handy"
-      upload-artifacts: false
-      release-id: ${{ needs.create-release.outputs.release-id }}
-    secrets: inherit
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: macos-26-aarch64-apple-darwin
+
+      - name: Install frontend dependencies
+        run: bun install
+
+      - name: Build with Tauri (unsigned)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          releaseId: ${{ needs.create-release.outputs.release-id }}
+          args: --target aarch64-apple-darwin
