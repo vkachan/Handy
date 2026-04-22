@@ -2,7 +2,7 @@ import React from "react";
 import { useTranslation } from "react-i18next";
 import { SettingsGroup } from "../../ui/SettingsGroup";
 import { LanguageSelector } from "../LanguageSelector";
-import { TranslateToEnglish } from "../TranslateToEnglish";
+import { ShortcutInput } from "../ShortcutInput";
 import { useModelStore } from "../../../stores/modelStore";
 import type { ModelInfo } from "@/bindings";
 
@@ -36,7 +36,7 @@ export const ModelSettingsCard: React.FC = () => {
         />
       )}
       {supportsTranslation && (
-        <TranslateToEnglish descriptionMode="tooltip" grouped={true} />
+        <ShortcutInput shortcutId="transcribe_with_translation" grouped={true} />
       )}
     </SettingsGroup>
   );

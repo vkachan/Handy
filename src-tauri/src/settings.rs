@@ -754,6 +754,17 @@ pub fn get_default_settings() -> AppSettings {
         },
     );
     bindings.insert(
+        "transcribe_with_translation".to_string(),
+        ShortcutBinding {
+            id: "transcribe_with_translation".to_string(),
+            name: "Transcribe with Translation".to_string(),
+            description: "Records and transcribes your speech, translating to English."
+                .to_string(),
+            default_binding: String::new(),
+            current_binding: String::new(),
+        },
+    );
+    bindings.insert(
         "cancel".to_string(),
         ShortcutBinding {
             id: "cancel".to_string(),
