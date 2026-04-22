@@ -70,4 +70,4 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           releaseId: ${{ needs.create-release.outputs.release-id }}
-          args: --target aarch64-apple-darwin
+          args: --target aarch64-apple-darwin --bundles dmg
