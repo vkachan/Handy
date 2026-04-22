@@ -162,7 +162,12 @@ pub async fn set_active_model(
     _transcription_manager: State<'_, Arc<TranscriptionManager>>,
     model_id: String,
 ) -> Result<(), String> {
-    switch_active_model(&app_handle, &model_id)
+    // Model loading (ONNX session creation) is CPU-intensive and can take
+    // minutes on first run. Run it on a blocking thread to avoid starving
+    // the tokio async runtime.
+    tokio::task::spawn_blocking(move || switch_active_model(&app_handle, &model_id))
+        .await
+        .map_err(|e| format!("Model loading task panicked: {}", e))?
 }
 
 #[tauri::command]

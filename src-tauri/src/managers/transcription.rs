@@ -10,6 +10,11 @@ use serde::Serialize;
 use specta::Type;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// Set to true if ORT's process-wide API can be initialized at startup.
+/// When false, all ONNX-based model loads are short-circuited immediately so
+/// that ORT's G_ENV mutex is never acquired (and thus never poisoned).
+static ORT_API_OK: AtomicBool = AtomicBool::new(false);
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -299,83 +304,111 @@ impl TranscriptionManager {
             );
         };
 
-        let loaded_engine = match model_info.engine_type {
-            EngineType::Whisper => {
-                let engine = WhisperEngine::load(&model_path).map_err(|e| {
-                    let error_msg = format!("Failed to load whisper model {}: {}", model_id, e);
-                    emit_loading_failed(&error_msg);
-                    anyhow::anyhow!(error_msg)
-                })?;
-                LoadedEngine::Whisper(engine)
-            }
-            EngineType::Parakeet => {
-                let engine =
-                    ParakeetModel::load(&model_path, &Quantization::Int8).map_err(|e| {
-                        let error_msg =
-                            format!("Failed to load parakeet model {}: {}", model_id, e);
-                        emit_loading_failed(&error_msg);
-                        anyhow::anyhow!(error_msg)
-                    })?;
-                LoadedEngine::Parakeet(engine)
-            }
-            EngineType::Moonshine => {
-                let engine = MoonshineModel::load(
-                    &model_path,
+        // For ONNX-based engines, verify ORT initialized successfully at startup.
+        // This avoids acquiring G_ENV (ORT's global env mutex) when ORT is known
+        // to be broken — acquiring it while setup_api() panics would poison it and
+        // make every subsequent model load fail with an opaque "Mutex poisoned".
+        let engine_type = model_info.engine_type.clone();
+        if !matches!(engine_type, EngineType::Whisper)
+            && !ORT_API_OK.load(Ordering::SeqCst)
+        {
+            let error_msg = "ORT (ONNX Runtime) API failed to initialize on this system. \
+                ONNX-based models are unavailable. \
+                If you built on an Intel Mac for ARM64, try using a Whisper-based model instead.";
+            error!("{}", error_msg);
+            emit_loading_failed(error_msg);
+            return Err(anyhow::anyhow!(error_msg));
+        }
+
+        // Wrap engine creation in catch_unwind to handle panics from ONNX Runtime or
+        // engine libraries that panic instead of returning Err. Without this, a panic
+        // leaves the frontend permanently stuck in "Loading..." because loading_failed
+        // is never emitted.
+        let model_path_clone = model_path.clone();
+        let model_id_owned = model_id.to_string();
+        let engine_result = catch_unwind(AssertUnwindSafe(|| -> Result<LoadedEngine> {
+            match engine_type {
+                EngineType::Whisper => WhisperEngine::load(&model_path_clone)
+                    .map(LoadedEngine::Whisper)
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to load whisper model {}: {}", model_id_owned, e)
+                    }),
+                EngineType::Parakeet => {
+                    ParakeetModel::load(&model_path_clone, &Quantization::Int8)
+                        .map(LoadedEngine::Parakeet)
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "Failed to load parakeet model {}: {}",
+                                model_id_owned,
+                                e
+                            )
+                        })
+                }
+                EngineType::Moonshine => MoonshineModel::load(
+                    &model_path_clone,
                     MoonshineVariant::Base,
                     &Quantization::default(),
                 )
+                .map(LoadedEngine::Moonshine)
                 .map_err(|e| {
-                    let error_msg = format!("Failed to load moonshine model {}: {}", model_id, e);
-                    emit_loading_failed(&error_msg);
-                    anyhow::anyhow!(error_msg)
-                })?;
-                LoadedEngine::Moonshine(engine)
-            }
-            EngineType::MoonshineStreaming => {
-                let engine = StreamingModel::load(&model_path, 0, &Quantization::default())
+                    anyhow::anyhow!("Failed to load moonshine model {}: {}", model_id_owned, e)
+                }),
+                EngineType::MoonshineStreaming => {
+                    StreamingModel::load(&model_path_clone, 0, &Quantization::default())
+                        .map(LoadedEngine::MoonshineStreaming)
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "Failed to load moonshine streaming model {}: {}",
+                                model_id_owned,
+                                e
+                            )
+                        })
+                }
+                EngineType::SenseVoice => {
+                    SenseVoiceModel::load(&model_path_clone, &Quantization::Int8)
+                        .map(LoadedEngine::SenseVoice)
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "Failed to load SenseVoice model {}: {}",
+                                model_id_owned,
+                                e
+                            )
+                        })
+                }
+                EngineType::GigaAM => GigaAMModel::load(&model_path_clone, &Quantization::Int8)
+                    .map(LoadedEngine::GigaAM)
                     .map_err(|e| {
-                        let error_msg = format!(
-                            "Failed to load moonshine streaming model {}: {}",
-                            model_id, e
-                        );
-                        emit_loading_failed(&error_msg);
-                        anyhow::anyhow!(error_msg)
-                    })?;
-                LoadedEngine::MoonshineStreaming(engine)
+                        anyhow::anyhow!("Failed to load gigaam model {}: {}", model_id_owned, e)
+                    }),
+                EngineType::Canary => CanaryModel::load(&model_path_clone, &Quantization::Int8)
+                    .map(LoadedEngine::Canary)
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to load canary model {}: {}", model_id_owned, e)
+                    }),
+                EngineType::Cohere => CohereModel::load(&model_path_clone, &Quantization::Int8)
+                    .map(LoadedEngine::Cohere)
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to load cohere model {}: {}", model_id_owned, e)
+                    }),
             }
-            EngineType::SenseVoice => {
-                let engine =
-                    SenseVoiceModel::load(&model_path, &Quantization::Int8).map_err(|e| {
-                        let error_msg =
-                            format!("Failed to load SenseVoice model {}: {}", model_id, e);
-                        emit_loading_failed(&error_msg);
-                        anyhow::anyhow!(error_msg)
-                    })?;
-                LoadedEngine::SenseVoice(engine)
+        }));
+
+        let loaded_engine = match engine_result {
+            Ok(Ok(engine)) => engine,
+            Ok(Err(e)) => {
+                emit_loading_failed(&e.to_string());
+                return Err(e);
             }
-            EngineType::GigaAM => {
-                let engine = GigaAMModel::load(&model_path, &Quantization::Int8).map_err(|e| {
-                    let error_msg = format!("Failed to load gigaam model {}: {}", model_id, e);
-                    emit_loading_failed(&error_msg);
-                    anyhow::anyhow!(error_msg)
-                })?;
-                LoadedEngine::GigaAM(engine)
-            }
-            EngineType::Canary => {
-                let engine = CanaryModel::load(&model_path, &Quantization::Int8).map_err(|e| {
-                    let error_msg = format!("Failed to load canary model {}: {}", model_id, e);
-                    emit_loading_failed(&error_msg);
-                    anyhow::anyhow!(error_msg)
-                })?;
-                LoadedEngine::Canary(engine)
-            }
-            EngineType::Cohere => {
-                let engine = CohereModel::load(&model_path, &Quantization::Int8).map_err(|e| {
-                    let error_msg = format!("Failed to load cohere model {}: {}", model_id, e);
-                    emit_loading_failed(&error_msg);
-                    anyhow::anyhow!(error_msg)
-                })?;
-                LoadedEngine::Cohere(engine)
+            Err(panic_payload) => {
+                let panic_msg = panic_payload
+                    .downcast::<String>()
+                    .map(|s| *s)
+                    .or_else(|p| p.downcast::<&'static str>().map(|s| (*s).to_string()))
+                    .unwrap_or_else(|_| "Unknown panic in engine loader".to_string());
+                let error_msg = format!("Model loading panicked: {}", panic_msg);
+                error!("{}", error_msg);
+                emit_loading_failed(&error_msg);
+                return Err(anyhow::anyhow!(error_msg));
             }
         };
 
@@ -737,6 +770,47 @@ impl TranscriptionManager {
 /// Called on startup and whenever the user changes the setting.
 pub fn apply_accelerator_settings(app: &tauri::AppHandle) {
     use transcribe_rs::accel;
+
+    // ORT's default tracing_logger contains assert!() calls that panic when ORT
+    // passes null C string pointers. Registering our own null-safe logger first
+    // prevents tracing_logger from being used during environment creation.
+    let committed = ort::init()
+        .with_logger(std::sync::Arc::new(
+            |_level, _category, _id, code_location, message| {
+                log::debug!("[ORT] {} @ {}", message, code_location);
+            },
+        ))
+        .commit();
+    if committed {
+        info!("ORT environment options registered with null-safe logger");
+    }
+
+    // Force ORT's API pointer (G_ORT_API) to initialize NOW, outside any G_ENV
+    // lock, so that if setup_api() panics the global ORT environment mutex is
+    // never poisoned. Without this, the panic would occur inside
+    // environment::current() while G_ENV is held, making every subsequent ORT
+    // call fail with an opaque "Mutex poisoned" error.
+    let ort_api_result = std::panic::catch_unwind(|| ort::api());
+    match ort_api_result {
+        Ok(_) => {
+            info!("ORT API initialized successfully — ONNX models available");
+            ORT_API_OK.store(true, Ordering::SeqCst);
+        }
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            error!(
+                "ORT API failed to initialize: {}. \
+                 ONNX-based models (Parakeet, Moonshine, GigaAM, etc.) will not be available. \
+                 If you built on an Intel Mac targeting ARM64, try using Whisper-based models instead.",
+                msg
+            );
+            ORT_API_OK.store(false, Ordering::SeqCst);
+        }
+    }
 
     let settings = get_settings(app);
 

@@ -318,6 +318,30 @@ pub fn run(cli_args: CliArgs) {
     // Detect portable mode before anything else
     portable::init();
 
+    // Install a process-wide panic hook that logs every panic with its exact
+    // file/line location. This is critical for diagnosing ORT (ONNX Runtime)
+    // failures that manifest as a secondary "Mutex poisoned" panic — the hook
+    // reveals the *first* panic that poisons the mutex.
+    std::panic::set_hook(Box::new(|info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown location".to_string());
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| {
+                info.payload()
+                    .downcast_ref::<String>()
+                    .map(|s| s.as_str())
+            })
+            .unwrap_or("(unknown panic payload)");
+        let msg = format!("PANIC at {}: {}", location, message);
+        log::error!("{}", msg);
+        eprintln!("{}", msg);
+    }));
+
     // Parse console logging directives from RUST_LOG, falling back to info-level logging
     // when the variable is unset
     let console_filter = build_console_filter();
