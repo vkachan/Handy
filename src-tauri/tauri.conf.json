@@ -64,9 +64,5 @@
       }
     }
   },
-  "plugins": {
-    "updater": {
-      "endpoints": []
-    }
-  }
+  "plugins": {}
 }
