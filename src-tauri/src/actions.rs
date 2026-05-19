@@ -64,6 +64,57 @@ fn build_system_prompt(prompt_template: &str) -> String {
     prompt_template.replace("${output}", "").trim().to_string()
 }
 
+fn maybe_uncapitalize_first_letter(text: &str, enabled: bool) -> String {
+    if !enabled || text.is_empty() {
+        return text.to_string();
+    }
+
+    let first_non_ws = match text.char_indices().find(|(_, c)| !c.is_whitespace()) {
+        Some((idx, _)) => idx,
+        None => return text.to_string(),
+    };
+
+    let rest = &text[first_non_ws..];
+    let first_token = rest
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '(' | '[' | '{'));
+
+    if first_token == "I" || first_token.starts_with("I'") {
+        return text.to_string();
+    }
+
+    let letters: String = first_token
+        .chars()
+        .take_while(|c| c.is_alphabetic())
+        .collect();
+    if letters.len() > 1
+        && letters.chars().all(|c| c.is_uppercase())
+        && letters.chars().any(|c| c.is_alphabetic())
+    {
+        return text.to_string();
+    }
+
+    let mut result = String::with_capacity(text.len());
+    result.push_str(&text[..first_non_ws]);
+
+    let mut lowered = false;
+    for c in text[first_non_ws..].chars() {
+        if !lowered && c.is_uppercase() {
+            result.extend(c.to_lowercase());
+            lowered = true;
+        } else {
+            result.push(c);
+            if !lowered && c.is_lowercase() {
+                lowered = true;
+            }
+        }
+    }
+
+    result
+}
+
 async fn post_process_transcription(settings: &AppSettings, transcription: &str) -> Option<String> {
     let provider = match settings.active_post_process_provider().cloned() {
         Some(provider) => provider,
@@ -379,6 +430,8 @@ pub(crate) async fn process_transcription_output(
     } else if final_text != transcription {
         post_processed_text = Some(final_text.clone());
     }
+
+    final_text = maybe_uncapitalize_first_letter(&final_text, settings.uncapitalize_transcriptions);
 
     ProcessedTranscription {
         final_text,

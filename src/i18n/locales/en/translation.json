@@ -199,6 +199,10 @@
       "pushToTalk": {
         "label": "Push To Talk",
         "description": "Hold to record, release to stop"
+      },
+      "uncapitalize": {
+        "label": "Lowercase Sentence Start",
+        "description": "Start transcriptions with a lowercase letter. Keeps \"I\" and all-caps abbreviations unchanged."
       }
     },
     "models": {
