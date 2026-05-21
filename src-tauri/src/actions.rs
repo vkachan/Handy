@@ -64,50 +64,73 @@ fn build_system_prompt(prompt_template: &str) -> String {
     prompt_template.replace("${output}", "").trim().to_string()
 }
 
-fn maybe_uncapitalize_first_letter(text: &str, enabled: bool) -> String {
+fn should_preserve_sentence_start_token(token: &str) -> bool {
+    if token == "I" || token.starts_with("I'") {
+        return true;
+    }
+
+    let letters: String = token.chars().take_while(|c| c.is_alphabetic()).collect();
+    letters.len() > 1
+        && letters.chars().all(|c| c.is_uppercase())
+        && letters.chars().any(|c| c.is_alphabetic())
+}
+
+fn maybe_uncapitalize_sentence_starts(text: &str, enabled: bool) -> String {
     if !enabled || text.is_empty() {
         return text.to_string();
     }
 
-    let first_non_ws = match text.char_indices().find(|(_, c)| !c.is_whitespace()) {
-        Some((idx, _)) => idx,
-        None => return text.to_string(),
-    };
-
-    let rest = &text[first_non_ws..];
-    let first_token = rest
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .trim_matches(|c: char| matches!(c, '"' | '\'' | '(' | '[' | '{'));
-
-    if first_token == "I" || first_token.starts_with("I'") {
-        return text.to_string();
-    }
-
-    let letters: String = first_token
-        .chars()
-        .take_while(|c| c.is_alphabetic())
-        .collect();
-    if letters.len() > 1
-        && letters.chars().all(|c| c.is_uppercase())
-        && letters.chars().any(|c| c.is_alphabetic())
-    {
-        return text.to_string();
-    }
-
     let mut result = String::with_capacity(text.len());
-    result.push_str(&text[..first_non_ws]);
+    let mut sentence_start = true;
 
-    let mut lowered = false;
-    for c in text[first_non_ws..].chars() {
-        if !lowered && c.is_uppercase() {
-            result.extend(c.to_lowercase());
-            lowered = true;
-        } else {
+    for (byte_idx, c) in text.char_indices() {
+        if sentence_start {
+            if c.is_whitespace() || matches!(c, '"' | '\'' | '(' | '[' | '{') {
+                result.push(c);
+                continue;
+            }
+
+            if c.is_alphabetic() {
+                let token = text[byte_idx..]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default();
+                if !should_preserve_sentence_start_token(token) && c.is_uppercase() {
+                    result.extend(c.to_lowercase());
+                } else {
+                    result.push(c);
+                }
+                sentence_start = false;
+                continue;
+            }
+
             result.push(c);
-            if !lowered && c.is_lowercase() {
-                lowered = true;
+            sentence_start = false;
+            continue;
+        }
+
+        result.push(c);
+
+        if matches!(c, '.' | '!' | '?') {
+            let trailing = &text[byte_idx + c.len_utf8()..];
+            let mut chars = trailing.chars().peekable();
+            let mut saw_space = false;
+
+            while let Some(next) = chars.peek().copied() {
+                if next.is_whitespace() {
+                    saw_space = true;
+                    chars.next();
+                    continue;
+                }
+                if matches!(next, '"' | '\'' | ')' | ']' | '}') {
+                    chars.next();
+                    continue;
+                }
+                break;
+            }
+
+            if saw_space || chars.peek().is_none() {
+                sentence_start = true;
             }
         }
     }
@@ -431,7 +454,7 @@ pub(crate) async fn process_transcription_output(
         post_processed_text = Some(final_text.clone());
     }
 
-    final_text = maybe_uncapitalize_first_letter(&final_text, settings.uncapitalize_transcriptions);
+    final_text = maybe_uncapitalize_sentence_starts(&final_text, settings.uncapitalize_transcriptions);
 
     ProcessedTranscription {
         final_text,
