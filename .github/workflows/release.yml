@@ -2,10 +2,6 @@ name: "Release"
 
 on: workflow_dispatch
 
-env:
-  TAURI_SIGNING_PRIVATE_KEY: "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHNlY3JldCBrZXkgNzNCNkU2MjkyNERGNTNFQQpSV1FBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFPVW1uMFlmWDJRU2M3Ym1LU1RmVStxaXpZK0JON2VKbDlQZ1p1ZUwyNi8vWGlEc05odkdjQXVQUVNRY3lxdjErbEJTV3p3eFErZkRtQTMrQThhK3VaNE5XR0VGa3BlR0pBTXFSSVhhaHRaMQo="
-  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-
 jobs:
   create-release:
     permissions:
@@ -16,18 +12,19 @@ jobs:
       version: ${{ steps.get-version.outputs.version }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Get version from tauri.conf.json
         id: get-version
         shell: bash
         run: |
           VERSION=$(grep -o '"version": "[^"]*"' src-tauri/tauri.conf.json | cut -d'"' -f4)
+          echo "Application version from tauri.conf.json: $VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Create Draft Release
         id: create-release
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const { data } = await github.rest.repos.createRelease({
@@ -41,80 +38,46 @@ jobs:
             })
             return data.id
 
-  build:
+  publish-tauri:
     permissions:
       contents: write
     needs: create-release
-    runs-on: macos-26
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - target: aarch64-apple-darwin
-            dmg_dir: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg
-          - target: x86_64-apple-darwin
-            dmg_dir: src-tauri/target/x86_64-apple-darwin/release/bundle/dmg
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+          - platform: "macos-26" # for Arm based macs (M1 and above). Uses macOS 26 for Apple Intelligence SDK.
+            args: "--target aarch64-apple-darwin"
+            target: "aarch64-apple-darwin"
+          - platform: "macos-latest" # for Intel based macs.
+            args: "--target x86_64-apple-darwin"
+            target: "x86_64-apple-darwin"
+          - platform: "ubuntu-22.04" # Build .deb on 22.04
+            args: "--bundles deb"
+            target: "x86_64-unknown-linux-gnu"
+          - platform: "ubuntu-24.04" # Build AppImage and RPM on 24.04
+            args: "--bundles appimage,rpm"
+            target: "x86_64-unknown-linux-gnu"
+          - platform: "ubuntu-24.04-arm" # Build for ARM64 Linux
+            args: "--bundles appimage,deb,rpm"
+            target: "aarch64-unknown-linux-gnu"
+          - platform: "windows-latest"
+            args: ""
+            target: "x86_64-pc-windows-msvc"
+          - platform: "windows-11-arm" # for ARM64 Windows runner
+            args: "--target aarch64-pc-windows-msvc"
+            target: "aarch64-pc-windows-msvc"
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: "./src-tauri -> target"
-          key: macos-26-${{ matrix.target }}
-
-      - name: Install frontend dependencies
-        run: bun install
-
-      - name: Install ONNX Runtime (x86_64)
-        if: matrix.target == 'x86_64-apple-darwin'
-        run: |
-          ORT_VERSION="1.24.2"
-          curl -L -o ort.tgz "https://blob.handy.computer/onnxruntime-osx-x86_64-${ORT_VERSION}.tgz"
-          tar xzf ort.tgz
-          ORT_DIR="$(pwd)/onnxruntime-osx-x86_64-${ORT_VERSION}"
-          echo "ORT_LIB_LOCATION=$ORT_DIR/lib" >> $GITHUB_ENV
-          echo "ORT_PREFER_DYNAMIC_LINK=1" >> $GITHUB_ENV
-          jq --arg lib "$ORT_DIR/lib/libonnxruntime.${ORT_VERSION}.dylib" \
-            '.bundle.macOS.frameworks = [$lib]' \
-            src-tauri/tauri.conf.json > tmp.json && mv tmp.json src-tauri/tauri.conf.json
-
-      - name: Build
-        run: bun run tauri build --target ${{ matrix.target }} --bundles dmg
-
-      - name: Upload DMG to release
-        uses: actions/github-script@v7
-        env:
-          RELEASE_ID: ${{ needs.create-release.outputs.release-id }}
-          DMG_DIR: ${{ matrix.dmg_dir }}
-        with:
-          script: |
-            const fs = require('fs');
-            const path = require('path');
-            const releaseId = parseInt(process.env.RELEASE_ID);
-            const dmgDir = process.env.DMG_DIR;
-            const files = fs.readdirSync(dmgDir).filter(f => f.endsWith('.dmg'));
-            for (const file of files) {
-              const filePath = path.join(dmgDir, file);
-              const data = fs.readFileSync(filePath);
-              await github.rest.repos.uploadReleaseAsset({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                release_id: releaseId,
-                name: file,
-                data: data,
-                headers: {
-                  'content-type': 'application/octet-stream',
-                  'content-length': data.length,
-                },
-              });
-              console.log(`Uploaded ${file}`);
-            }
+    uses: ./.github/workflows/build.yml
+    with:
+      platform: ${{ matrix.platform }}
+      target: ${{ matrix.target }}
+      build-args: ${{ matrix.args }}
+      sign-binaries: true
+      asset-prefix: "handy"
+      upload-artifacts: false
+      release-id: ${{ needs.create-release.outputs.release-id }}
+      # Releases always build from scratch — never restore the Rust cache, so a
+      # stale cached native lib can never be linked into a shipped artifact.
+      no-cache: true
+    secrets: inherit
