@@ -545,6 +545,18 @@ jobs:
           assetNamePattern: ${{ steps.patch-release-name.outputs.platform }}
           args: ${{ inputs.build-args }}
 
+      - name: Strip updater config for unsigned builds
+        if: ${{ !inputs.sign-binaries }}
+        shell: bash
+        run: |
+          # Unsigned builds should not keep the updater config around. If the
+          # public updater key stays in tauri.conf.json, tauri-action still
+          # expects TAURI_SIGNING_PRIVATE_KEY and fails the build.
+          jq '
+            .bundle.createUpdaterArtifacts = false
+            | del(.plugins.updater)
+          ' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp
+          mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
       - name: Build with Tauri (unsigned)
         if: ${{ !inputs.sign-binaries }}
         uses: tauri-apps/tauri-action@v0
