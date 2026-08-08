@@ -1903,12 +1903,10 @@ impl ModelManager {
         // whole download. Each attempt resumes from the `.sync.part`
         // committed-offset marker, so a retry only re-fetches what the failed
         // attempt hadn't finished.
-        // Start moderately parallel for normal-network throughput, then stay
-        // sequential after the first failure. Eight simultaneous connections
-        // were all reset on an affected network in #1579, while one stream
-        // succeeded; four is a less aggressive fast path, and every retry uses
-        // the known-compatible request pattern.
-        const ATTEMPT_STREAMS: [usize; 4] = [4, 1, 1, 1];
+        // Use a single stream for every attempt. This is the most conservative
+        // path and matches the direct browser download behavior more closely
+        // than hf-hub's default parallel fetches.
+        const ATTEMPT_STREAMS: [usize; 4] = [1; 4];
         let mut attempt: usize = 1;
         let hf_error = loop {
             let stream_count = ATTEMPT_STREAMS[attempt - 1];
